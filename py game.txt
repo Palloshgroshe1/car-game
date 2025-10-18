@@ -1,0 +1,447 @@
+import pygame
+import random
+import sys
+import os
+
+# --- INITIALIZATION & CONSTANTS ---
+pygame.init()
+pygame.mixer.init() # Initialize mixer for sounds
+
+# Fullscreen setup
+screen_info = pygame.display.Info()
+SCREEN_WIDTH = screen_info.current_w
+SCREEN_HEIGHT = screen_info.current_h
+
+CAR_WIDTH = 140
+CAR_HEIGHT = 150
+FPS = 60
+
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (220, 0, 0)
+GRAY = (50, 50, 50)
+DARK_GRAY = (30, 30, 30)
+YELLOW = (255, 200, 0)
+CYAN = (0, 200, 255)
+GREEN = (0, 200, 50) # New color for Shield
+
+# Load images for 4 cars
+# NOTE: Ensure all these image files are in the same directory as the script!
+try:
+    player_cars = [
+        pygame.transform.scale(pygame.image.load("car1.png"), (CAR_WIDTH, CAR_HEIGHT)),
+        pygame.transform.scale(pygame.image.load("car2.png"), (CAR_WIDTH, CAR_HEIGHT)),
+        pygame.transform.scale(pygame.image.load("car3.png"), (CAR_WIDTH, CAR_HEIGHT)),
+        pygame.transform.scale(pygame.image.load("car4.png"), (CAR_WIDTH, CAR_HEIGHT)),
+    ]
+    special_car = pygame.transform.scale(pygame.image.load("special_car.png"), (CAR_WIDTH, CAR_HEIGHT))
+    enemy_image = pygame.transform.scale(pygame.image.load("enemy_car.jpeg"), (CAR_WIDTH, CAR_HEIGHT))
+    explosion_image = pygame.transform.scale(pygame.image.load("explosion.png"), (CAR_WIDTH, CAR_HEIGHT))
+except pygame.error as e:
+    print(f"Error loading images: {e}. Make sure all required image files are present.")
+    pygame.quit()
+    sys.exit()
+
+# Load sounds
+try:
+    crash_sound = pygame.mixer.Sound("crash.wav")
+    pygame.mixer.music.load("background.mp3")
+except pygame.error as e:
+    print(f"Error loading sound: {e}. Running without sound.")
+    # Create a dummy sound object if load fails to prevent crashes
+    class DummySound:
+        def play(self): pass
+    crash_sound = DummySound()
+    
+# High score file setup
+downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+game_folder = os.path.join(downloads_path, "game")
+os.makedirs(game_folder, exist_ok=True)
+HS_FILE = os.path.join(game_folder, "highscore.txt")
+
+# Load font early
+pygame.font.init()
+try:
+    FONT = pygame.font.Font(None, 40) # Use default system font
+except:
+    FONT = pygame.font.SysFont("Arial", 40) # Fallback to a specific font
+
+# --- HELPER FUNCTIONS ---
+
+def load_highscore():
+    if os.path.exists(HS_FILE):
+        try:
+            with open(HS_FILE, "r") as f:
+                return int(f.read().strip())
+        except ValueError:
+            return 0
+    return 0
+
+def save_highscore(score):
+    with open(HS_FILE, "w") as f:
+        f.write(str(score))
+
+# --- CLASSES ---
+
+class PlayerCar:
+    def __init__(self, car_img):
+        self.image = car_img
+        self.x = SCREEN_WIDTH // 2 - CAR_WIDTH // 2
+        self.y = SCREEN_HEIGHT - CAR_HEIGHT - 40
+        self.speed = 12
+        self.lives = 3
+        # Invulnerability and Shield
+        self.is_invulnerable = False
+        self.invuln_duration = 1500  # 1.5 seconds
+        self.hit_time = 0
+        self.has_shield = False
+
+    def update(self, keys):
+        if keys[pygame.K_LEFT]:
+            self.x -= self.speed
+        if keys[pygame.K_RIGHT]:
+            self.x += self.speed
+        # Boundary check
+        self.x = max(200, min(self.x, SCREEN_WIDTH - 200 - CAR_WIDTH))
+        
+        # Check if invulnerability has ended
+        if self.is_invulnerable and pygame.time.get_ticks() - self.hit_time > self.invuln_duration:
+            self.is_invulnerable = False
+
+    def draw(self, screen):
+        # Flashing effect when invulnerable
+        current_time = pygame.time.get_ticks()
+        should_draw = True
+        if self.is_invulnerable:
+            # Flashes every 150ms
+            if (current_time - self.hit_time) % 300 < 150:
+                should_draw = False
+
+        if should_draw:
+            screen.blit(self.image, (self.x, self.y))
+        
+        # Draw shield visual if active
+        if self.has_shield:
+            pygame.draw.circle(screen, GREEN, (self.x + CAR_WIDTH // 2, self.y + CAR_HEIGHT // 2), CAR_WIDTH // 2 + 10, 5)
+
+        # Smaller hitbox
+        hitbox_padding_w = 40
+        hitbox_padding_h = 20
+        return pygame.Rect(
+            self.x + hitbox_padding_w // 2,
+            self.y + hitbox_padding_h // 2,
+            CAR_WIDTH - hitbox_padding_w,
+            CAR_HEIGHT - hitbox_padding_h
+        )
+
+class EnemyCar:
+    def __init__(self, speed_boost=0):
+        lane_width = (SCREEN_WIDTH - 400) // 4
+        # Calculate lane center positions
+        lane_positions = [200 + lane_width * i + lane_width // 2 - CAR_WIDTH // 2 for i in range(4)]
+        self.x = random.choice(lane_positions)
+        self.y = -CAR_HEIGHT
+        # Base speed adjusted slightly to make speed_boost more impactful
+        self.speed = random.randint(5, 10) + speed_boost 
+
+    def update(self):
+        self.y += self.speed
+
+    def draw(self, screen):
+        screen.blit(enemy_image, (self.x, self.y))
+        # Smaller hitbox
+        hitbox_padding_w = 40
+        hitbox_padding_h = 20
+        return pygame.Rect(
+            self.x + hitbox_padding_w // 2,
+            self.y + hitbox_padding_h // 2,
+            CAR_WIDTH - hitbox_padding_w,
+            CAR_HEIGHT - hitbox_padding_h
+        )
+
+class PowerUp:
+    def __init__(self):
+        # Added "shield" power-up
+        self.types = ["life", "slow", "score", "shield"] 
+        self.kind = random.choice(self.types)
+        
+        # Ensure spawn location is within the road
+        self.x = random.randint(220, SCREEN_WIDTH - 220 - 40)
+        self.y = -40
+        self.speed = 6
+
+    def update(self):
+        self.y += self.speed
+
+    def draw(self, screen):
+        if self.kind == "life":
+            color = YELLOW
+        elif self.kind == "slow":
+            color = CYAN
+        elif self.kind == "shield": # New shield color
+            color = GREEN
+        else: # score
+            color = WHITE
+            
+        pygame.draw.circle(screen, color, (self.x, self.y), 20)
+        # Add a letter for clarity
+        text_content = ""
+        if self.kind == "life": text_content = "+"
+        elif self.kind == "slow": text_content = "S"
+        elif self.kind == "score": text_content = "P"
+        elif self.kind == "shield": text_content = "🛡️"
+        
+        # Draw text/icon in the center
+        text_surface = FONT.render(text_content, True, BLACK)
+        screen.blit(text_surface, (self.x - text_surface.get_width()//2, self.y - text_surface.get_height()//2))
+        
+        return pygame.Rect(self.x - 20, self.y - 20, 40, 40)
+
+# --- GAME LOGIC ---
+
+def draw_road(screen, road_lines, line_height, dynamic_road_speed):
+    """Draws the background road, shoulders, and lines."""
+    screen.fill(DARK_GRAY)
+    
+    # Road Area
+    pygame.draw.rect(screen, GRAY, (200, 0, SCREEN_WIDTH - 400, SCREEN_HEIGHT))
+    # Shoulders
+    pygame.draw.rect(screen, BLACK, (0, 0, 200, SCREEN_HEIGHT))
+    pygame.draw.rect(screen, BLACK, (SCREEN_WIDTH - 200, 0, 200, SCREEN_HEIGHT))
+
+    # Road lines
+    lane_width = (SCREEN_WIDTH - 400) // 4
+    for y in road_lines:
+        for lane_x in [200 + lane_width, 200 + 2 * lane_width, 200 + 3 * lane_width]:
+            pygame.draw.rect(screen, WHITE, (lane_x - 4, y, 8, line_height // 2)) # Centered lines
+    
+    # Update line positions based on score/speed for dynamic effect
+    for i in range(len(road_lines)):
+        road_lines[i] += dynamic_road_speed
+        if road_lines[i] > SCREEN_HEIGHT:
+            road_lines[i] = -line_height
+
+def apply_powerup(player, enemies, powerup, score):
+    """Applies the effect of a collected power-up."""
+    if powerup.kind == "life":
+        player.lives += 1
+    elif powerup.kind == "slow":
+        for enemy in enemies:
+            enemy.speed = max(3, enemy.speed - 4) # Slow down all enemies
+    elif powerup.kind == "score":
+        score += 500
+    elif powerup.kind == "shield":
+        player.has_shield = True
+    return score
+
+def game_loop(screen, clock, chosen_car):
+    player = PlayerCar(chosen_car)
+    enemies = []
+    powerups = []
+    score = 0
+    running = True
+    paused = False
+    
+    speed_boost = 0
+    highscore = load_highscore()
+    
+    # Road Line Dynamics
+    line_height = 80
+    road_lines = [i * line_height for i in range(SCREEN_HEIGHT // line_height + 2)]
+    
+    # Sound
+    try:
+        pygame.mixer.music.play(-1)
+    except:
+        pass # Ignore if sound failed to load
+
+    while running:
+        # Determine dynamic road speed based on score/difficulty
+        dynamic_road_speed = 10 + min(15, score // 1000) 
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_p:
+                    paused = not paused
+
+        if paused:
+            pause_text = FONT.render("PAUSED - Press P to Resume", True, WHITE)
+            screen.blit(pause_text, (SCREEN_WIDTH//2 - pause_text.get_width()//2, SCREEN_HEIGHT//2))
+            pygame.display.flip()
+            clock.tick(10)
+            continue
+
+        # --- UPDATE ---
+        keys = pygame.key.get_pressed()
+        player.update(keys)
+
+        # Spawning logic: increases with score
+        spawn_rate = max(10, 25 - (score // 1000) * 2) # Faster spawning as score increases
+        if random.randint(1, spawn_rate) == 1:
+            enemies.append(EnemyCar(speed_boost))
+        if random.randint(1, 400) == 1: # Slightly more frequent powerups
+            powerups.append(PowerUp())
+
+        enemies = [e for e in enemies if e.y < SCREEN_HEIGHT + CAR_HEIGHT]
+        for e in enemies:
+            e.update()
+
+        powerups = [p for p in powerups if p.y < SCREEN_HEIGHT + 40]
+        for p in powerups:
+            p.update()
+
+        # --- DRAW ---
+        draw_road(screen, road_lines, line_height, dynamic_road_speed)
+        player_rect = player.draw(screen)
+
+        # Collision Check: Enemies
+        for e in enemies[:]: # Iterate over a copy for safe removal
+            enemy_rect = e.draw(screen)
+            if player_rect.colliderect(enemy_rect):
+                if player.has_shield:
+                    # Shield absorbs the hit
+                    player.has_shield = False
+                    enemies.remove(e)
+                elif not player.is_invulnerable:
+                    # Normal hit
+                    crash_sound.play()
+                    screen.blit(explosion_image, (player.x, player.y))
+                    
+                    # Start invulnerability
+                    player.is_invulnerable = True
+                    player.hit_time = pygame.time.get_ticks()
+                    
+                    player.lives -= 1
+                    enemies.remove(e)
+                    
+                    if player.lives <= 0:
+                        running = False
+                
+        # Collision Check: Power-ups
+        for p in powerups[:]:
+            rect = p.draw(screen)
+            if player_rect.colliderect(rect):
+                score = apply_powerup(player, enemies, p, score)
+                powerups.remove(p)
+
+        # --- SCORE & DIFFICULTY ---
+        score += 1
+        if score % 1000 == 0: # Increase difficulty less frequently, but more impactfully
+            speed_boost += 1
+
+        if score > highscore:
+            highscore = score
+            save_highscore(highscore)
+
+        # --- HUD ---
+        score_text = FONT.render(f"Score: {score}", True, WHITE)
+        lives_text = FONT.render(f"Lives: {player.lives}", True, YELLOW)
+        hs_text = FONT.render(f"High Score: {highscore}", True, CYAN)
+        speed_text = FONT.render(f"Speed: {speed_boost}", True, RED)
+
+        screen.blit(score_text, (20, 20))
+        screen.blit(lives_text, (20, 60))
+        screen.blit(hs_text, (20, 100))
+        screen.blit(speed_text, (20, 140))
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    return score, highscore
+
+# --- MENU & MAIN ---
+
+def menu(screen, clock):
+    selected = 0
+    secret_unlocked = False
+    
+    # Get high score for display
+    highscore = load_highscore()
+    
+    # Check if a specific image is the secret one to avoid crashing if it's missing
+    display_cars = player_cars.copy()
+    
+    while True:
+        screen.fill(BLACK)
+        title = FONT.render("🚗 Car Dodge Game 🚗", True, YELLOW)
+        screen.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, 100))
+        instr = FONT.render("LEFT/RIGHT: Select, ENTER: Start, C: Code", True, WHITE)
+        screen.blit(instr, (SCREEN_WIDTH//2 - instr.get_width()//2, 200))
+        
+        hs_text = FONT.render(f"ALL TIME HIGH SCORE: {highscore}", True, CYAN)
+        screen.blit(hs_text, (SCREEN_WIDTH//2 - hs_text.get_width()//2, 50))
+
+        # Display cars
+        if secret_unlocked and special_car not in display_cars:
+            display_cars.append(special_car)
+        
+        car_spacing = 180 # Increased spacing
+        total_width = len(display_cars) * car_spacing
+        
+        for i, car in enumerate(display_cars):
+            x = SCREEN_WIDTH//2 - total_width//2 + i*car_spacing
+            y = 300
+            if i == selected:
+                pygame.draw.rect(screen, CYAN, (x-10, y-10, CAR_WIDTH+20, CAR_HEIGHT+20), 5)
+            screen.blit(car, (x, y))
+
+        pygame.display.flip()
+        clock.tick(30)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_LEFT:
+                    selected = (selected - 1) % len(display_cars)
+                elif event.key == pygame.K_RIGHT:
+                    selected = (selected + 1) % len(display_cars)
+                elif event.key == pygame.K_RETURN:
+                    return display_cars[selected]
+                elif event.key == pygame.K_c:
+                    # Note: Using console input pauses the screen, but is the simplest solution
+                    code = input("Enter secret code: ").strip().lower()
+                    if code == "sedi":
+                        secret_unlocked = True
+                        print("Special car unlocked!")
+
+def main():
+    # Load screen, clock, and font once
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN)
+    pygame.display.set_caption("2D Car Dodge Game - Ultimate Edition")
+    clock = pygame.time.Clock()
+
+    while True:
+        chosen_car = menu(screen, clock)
+        score, highscore = game_loop(screen, clock, chosen_car)
+        
+        # Stop background music
+        pygame.mixer.music.stop() 
+
+        # --- GAME OVER SCREEN ---
+        screen.fill(BLACK)
+        text = FONT.render(f"Game Over! Your Score: {score}", True, RED)
+        hs_text = FONT.render(f"New High Score: {highscore}" if score == highscore else f"High Score: {highscore}", True, CYAN)
+        respawn = FONT.render("R: Restart or Q: Quit", True, WHITE)
+
+        screen.blit(text, (SCREEN_WIDTH//2 - text.get_width()//2, SCREEN_HEIGHT//2 - 100))
+        screen.blit(hs_text, (SCREEN_WIDTH//2 - hs_text.get_width()//2, SCREEN_HEIGHT//2 - 40))
+        screen.blit(respawn, (SCREEN_WIDTH//2 - respawn.get_width()//2, SCREEN_HEIGHT//2 + 20))
+        pygame.display.flip()
+
+        waiting = True
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        waiting = False
+                    elif event.key in (pygame.K_q, pygame.K_ESCAPE):
+                        pygame.quit(); sys.exit()
+
+if __name__ == "__main__":
+    main()
